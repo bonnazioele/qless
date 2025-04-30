@@ -3,13 +3,22 @@ session_start();
 require 'config.php';
 
 function estimateUnloadingTime($container_type) {
-    switch ($container_type) {
-        case '20GP': return '30–45 minutes';
-        case '40GP': return '45–90 minutes';
-        case '40HC': return '60–100 minutes';
-        case '45HC': return '75–120 minutes';
-        default: return 'Unknown – please specify container type';
-    }
+    return match($container_type) {
+        '20GP' => '30–45 minutes',
+        '40GP' => '45–90 minutes',
+        '40HC' => '60–100 minutes',
+        '45HC' => '75–120 minutes',
+        default => 'Unknown – please specify container type',
+    };
+}
+
+function requiredSlots($container_type) {
+    return match($container_type) {
+        '20GP' => 1,
+        '40GP', '40HC' => 2,
+        '45HC' => 3,
+        default => 1,
+    };
 }
 
 if (!isset($_SESSION['user']) || $_SESSION['user']['role'] !== 'driver') {
@@ -17,7 +26,7 @@ if (!isset($_SESSION['user']) || $_SESSION['user']['role'] !== 'driver') {
     exit;
 }
 
-$slots = $pdo->query("SELECT * FROM slots WHERE is_booked = 0")->fetchAll();
+$slots = $pdo->query("SELECT * FROM slots ORDER BY slot_time ASC")->fetchAll();
 
 $estimate = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -27,10 +36,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $estimate = estimateUnloadingTime($container_type);
 
     if (isset($_POST['confirm_booking'])) {
-        $pdo->prepare("UPDATE slots SET is_booked = 1 WHERE id = ?")->execute([$slot_id]);
-        $stmt = $pdo->prepare("INSERT INTO bookings (user_id, slot_id, container_type) VALUES (?, ?, ?)");
-        $stmt->execute([$user_id, $slot_id, $container_type]);
-        echo "<script>alert('Slot booked successfully!'); window.location.href='book.php';</script>";
+        $duration = requiredSlots($container_type);
+        $pdo->beginTransaction();
+
+        // Find the selected slot's position
+        $slot_index = null;
+        foreach ($slots as $i => $slot) {
+            if ($slot['id'] == $slot_id) {
+                $slot_index = $i;
+                break;
+            }
+        }
+
+        // Check if enough consecutive slots are available
+        $can_book = true;
+        for ($i = $slot_index; $i < $slot_index + $duration; $i++) {
+            if (!isset($slots[$i]) || $slots[$i]['is_booked']) {
+                $can_book = false;
+                break;
+            }
+        }
+
+        if ($can_book) {
+            // Book all necessary slots
+            for ($i = $slot_index; $i < $slot_index + $duration; $i++) {
+                $pdo->prepare("UPDATE slots SET is_booked = 1 WHERE id = ?")->execute([$slots[$i]['id']]);
+            }
+
+            // Insert booking reference
+            $stmt = $pdo->prepare("INSERT INTO bookings (user_id, slot_id, container_type) VALUES (?, ?, ?)");
+            $stmt->execute([$user_id, $slot_id, $container_type]);
+
+            $pdo->commit();
+            echo "<script>alert('Slot booked successfully!'); window.location.href='book.php';</script>";
+        } else {
+            $pdo->rollBack();
+            echo "<script>alert('Not enough consecutive slots available for this container type.');</script>";
+        }
     }
 }
 ?>
@@ -66,15 +108,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <select name="slot_id" class="form-select mb-3" required>
         <option value="">-- Choose Time Slot --</option>
         <?php foreach ($slots as $slot): ?>
-            <option value="<?= $slot['id'] ?>"><?= date('h:i A', strtotime($slot['slot_time'])) ?></option>
+            <option value="<?= $slot['is_booked'] ? '' : $slot['id'] ?>" <?= $slot['is_booked'] ? 'disabled' : '' ?>>
+                <?= date('h:i A', strtotime($slot['slot_time'])) ?>
+                <?= $slot['is_booked'] ? '(Unavailable)' : '' ?>
+            </option>
         <?php endforeach; ?>
     </select>
 
     <label>Select Container Type:</label>
     <select name="container_type" class="form-select mb-3" onchange="this.form.submit()" required>
         <option value="">-- Choose Container Type --</option>
-        <option value="20GP" <?= isset($_POST['container_type']) && $_POST['container_type'] == '20GP' ? 'selected' : '' ?>>20ft General Purpose (20GP)</option>
-        <option value="40GP" <?= isset($_POST['container_type']) && $_POST['container_type'] == '40GP' ? 'selected' : '' ?>>40ft General Purpose (40GP)</option>
+        <option value="20GP" <?= isset($_POST['container_type']) && $_POST['container_type'] == '20GP' ? 'selected' : '' ?>>20ft GP (20GP)</option>
+        <option value="40GP" <?= isset($_POST['container_type']) && $_POST['container_type'] == '40GP' ? 'selected' : '' ?>>40ft GP (40GP)</option>
         <option value="40HC" <?= isset($_POST['container_type']) && $_POST['container_type'] == '40HC' ? 'selected' : '' ?>>40ft High Cube (40HC)</option>
         <option value="45HC" <?= isset($_POST['container_type']) && $_POST['container_type'] == '45HC' ? 'selected' : '' ?>>45ft High Cube (45HC)</option>
     </select>
